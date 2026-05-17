@@ -1,0 +1,12 @@
+# Environment Variables (CRITICAL - Contains OpenAI API Key)
+.env
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Virtual Environment
+venv/
+env/
+.venv/
+.codex/
