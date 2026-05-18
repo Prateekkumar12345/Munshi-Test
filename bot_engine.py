@@ -1,90 +1,218 @@
+"""
+bot_engine.py
+Production Hybrid Intent Classification Engine
+
+Architecture:
+1. Slash command parser
+2. Lightweight deterministic extraction
+3. LLM semantic intent classification
+4. Validation layer
+5. Structured JSON response
+
+Supports:
+- English
+- Hindi
+- Hinglish
+
+Author: OpenAI Hybrid Architecture
+"""
+
 import json
 import os
 import re
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 from openai import OpenAI
 
+# ============================================================
+# ENV
+# ============================================================
+
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY")
+)
 
 CHAT_MODEL = "gpt-4.1-mini"
 
+# ============================================================
+# DATE EXTRACTOR
+# ============================================================
 
-# DATE EXTRACTION
+
 class DateTimeExtractor:
+
     RELATIVE_KEYWORDS = {
         "today": 0,
         "aaj": 0,
+        "आज": 0,
+
         "tomorrow": 1,
         "kal": 1,
+        "कल": 1,
+
         "parso": 2,
+        "परसों": 2,
+        "day after tomorrow": 2,
     }
 
     CLOCK_RE = re.compile(
-        r"(\d{1,2})(?:(\d{2}))?\s*(am|pm|baj|bje|baj|\*)?",
+        r"(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje|bje|baj|बजे)?",
         re.IGNORECASE,
     )
 
     @staticmethod
     def parse_clock(message: str):
+
         match = DateTimeExtractor.CLOCK_RE.search(message)
+
         if not match:
             return None
 
         hour = int(match.group(1))
         minute = int(match.group(2)) if match.group(2) else 0
-        amp = match.group(3)
 
-        if amp:
-            amp = amp.lower()
-            if amp == "pm" and hour != 12:
+        ampm = match.group(3)
+
+        if ampm:
+
+            ampm = ampm.lower()
+
+            if ampm == "pm" and hour != 12:
                 hour += 12
-            if amp == "am" and hour == 12:
+
+            elif ampm == "am" and hour == 12:
                 hour = 0
+
+            elif ampm in ["baje", "bje", "baj", "बजे"]:
+
+                # heuristic
+                if 1 <= hour <= 6:
+                    hour += 12
 
         return hour, minute
 
     @staticmethod
     def extract_date_from_message(message: str):
+
         now = datetime.now()
         today = now.date()
 
-        message_lower = message.lower()
+        ml = message.lower()
 
         final_date = None
 
+        # relative keywords
         for word, offset in DateTimeExtractor.RELATIVE_KEYWORDS.items():
-            if word in message_lower:
+
+            if word in ml:
                 final_date = today + timedelta(days=offset)
                 break
 
-        if "next week" in message_lower:
+        # next week
+        if "next week" in ml or "agle hafte" in ml:
             final_date = today + timedelta(days=7)
 
-        if "next month" in message_lower:
+        # next month
+        if "next month" in ml or "agle mahine" in ml:
             final_date = today + relativedelta(months=1)
 
-        if final_date:
-            return {"deadline": final_date.isoformat()}
-        return {"deadline": None}
+        # explicit date dd-mm-yyyy
+        explicit_date = re.search(
+            r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})",
+            message,
+        )
+
+        if explicit_date:
+
+            day, month, year = explicit_date.groups()
+
+            try:
+
+                final_date = datetime(
+                    int(year),
+                    int(month),
+                    int(day)
+                ).date()
+
+            except Exception:
+                pass
+
+        if not final_date:
+            return {
+                "deadline": None,
+                "type": None,
+            }
+
+        clock = DateTimeExtractor.parse_clock(message)
+
+        if clock:
+
+            hour, minute = clock
+
+            dt = datetime(
+                final_date.year,
+                final_date.month,
+                final_date.day,
+                hour,
+                minute,
+                0,
+            )
+
+            return {
+                "deadline": dt.isoformat(),
+                "type": "datetime",
+            }
+
+        return {
+            "deadline": final_date.strftime("%Y-%m-%d"),
+            "type": "date",
+        }
 
 
+# ============================================================
+# GENERAL CHAT RESPONSE
+# ============================================================
+
+
+def get_general_chat_response(message: str):
+
+    return (
+        "Main task management, attendance, assignment aur reports mein help kar sakta hoon. "
+        "Commands dekhne ke liye /help type karo."
+    )
+
+
+# ============================================================
 # COMMAND PARSER
+# ============================================================
+
+
 class CommandParser:
+
     def __init__(self):
+
         self.datetime_extractor = DateTimeExtractor()
 
     def parse(self, message: str):
+
         message = message.strip()
-        message_lower = message.lower()
+
+        ml = message.lower()
+
         datetime_info = self.datetime_extractor.extract_date_from_message(message)
 
-        def build(intent, id=None, worker_slug=None, depart_slug=None):
+        def build(
+            intent,
+            id=None,
+            worker_slug=None,
+            depart_slug=None,
+        ):
+
             return {
                 "intent": intent,
                 "id": id,
@@ -94,56 +222,87 @@ class CommandParser:
                 "message": None,
             }
 
-        if message_lower.startswith("/tasks"):
+        # ====================================================
+        # COMMANDS
+        # ====================================================
+
+        if ml.startswith("/tasks"):
             return build("/tasks")
-        if message_lower.startswith("/present"):
+
+        if ml.startswith("/present"):
             return build("/present")
-        if message_lower.startswith("/absent"):
+
+        if ml.startswith("/absent"):
             return build("/absent")
-        if message_lower.startswith("/help"):
+
+        if ml.startswith("/help"):
             return build("/help")
-        if message_lower.startswith("/report"):
+
+        if ml.startswith("/report"):
             return build("/report")
-        if message_lower.startswith("/members"):
+
+        if ml.startswith("/members"):
             return build("/members")
-        if message_lower.startswith("/issues"):
+
+        if ml.startswith("/issues"):
             return build("/issues")
-        if message_lower.startswith("/issue"):
+
+        if ml.startswith("/issue"):
             return build("/issue")
-        if message_lower.startswith("/resolve"):
+
+        if ml.startswith("/resolve"):
+
             task_id = re.search(r"\d+", message)
+
             return build(
-                "resolve",
+                "/resolve",
                 int(task_id.group()) if task_id else None,
             )
-        if message_lower.startswith("/complete"):
+
+        if ml.startswith("/complete"):
+
             task_id = re.search(r"\d+", message)
+
             return build(
-                "complete",
+                "/complete",
+                int(task_id.group()) if task_id else None,
+            )
+
+        if ml.startswith("/update"):
+
+            task_id = re.search(r"\d+", message)
+
+            return build(
+                "/update",
                 int(task_id.group()) if task_id else None,
             )
 
         return None
 
 
+# ============================================================
 # INTENT CLASSIFIER
+# ============================================================
+
+
 class IntentClassifier:
+
     VALID_INTENTS = {
-        "tasks",
-        "assign",
-        "depart_assign",
-        "mgrassign",
-        "mgrself",
-        "update",
-        "issue",
-        "issues",
-        "resolve",
-        "members",
-        "report",
-        "help",
-        "present",
-        "absent",
-        "complete",
+        "/tasks",
+        "/assign",
+        "/depart_assign",
+        "/mgrassign",
+        "/mgrself",
+        "/update",
+        "/issue",
+        "/issues",
+        "/resolve",
+        "/members",
+        "/report",
+        "/help",
+        "/present",
+        "/absent",
+        "/complete",
         "general_chat",
     }
 
@@ -155,125 +314,132 @@ class IntentClassifier:
     }
 
     def __init__(self):
+
         self.datetime_extractor = DateTimeExtractor()
+
         print("✅ Hybrid Intent Classifier Loaded")
 
-    # LIGHTWEIGHT EXTRACTION
+    # ========================================================
+    # ENTITY EXTRACTION
+    # ========================================================
+
     def extract_task_id(self, message: str):
+
         patterns = [
+
             r"task\s*(?:id)?\s*(\d+)",
+
             r"id\s*(\d+)",
+
             r"#(\d+)",
+
             r"(\d+)\s*wala\s*task",
+
+            r"task\s*number\s*(\d+)",
+
+            r"task\s*no\s*(\d+)",
         ]
+
         for pattern in patterns:
-            match = re.search(pattern, message, re.IGNORECASE)
+
+            match = re.search(
+                pattern,
+                message,
+                re.IGNORECASE,
+            )
+
             if match:
                 return int(match.group(1))
+
         return None
 
     def extract_mentions(self, message: str):
-        mentions = re.findall(r"@(\w+)", message)
+
+        mentions = re.findall(
+            r"@(\w+)",
+            message,
+        )
+
         if mentions:
             return f"@{mentions[0]}"
+
         return None
 
+    # ========================================================
     # LLM CLASSIFICATION
+    # ========================================================
+
     def llm_classify(self, message: str):
-        prompt = f"""Classify the user message into one of these intents:
-
-1. /tasks - User wants to see their tasks.
-   Examples: mera kaam dikhao, my tasks, pending tasks, kya kaam hai
-
-2. /assign - Assigning NEW work to a specific person.
-
-3. /depart_assign - Assigning work to a department WITHOUT naming a person.
-   Departments: operations, sales, purchase, it
-   Examples: warehouse khali karo, invoice bhejo, server theek karo, raw material order karo
-
-4. /mgrassign - Manager assigning EXISTING TASK to another person.
-   Examples: task 32 ajay ko do, @rahul task 5 complete karo, id 4 priya ko assign karo
-
-5. /mgrself - Manager taking task themselves.
-   Examples: task 32 main karunga, main ye task kar lunga, i will do task 8
-
-6. /complete - Task completed.
-   Examples: task 4 complete, ho gaya, kar diya, done
-
-7. /update - Updating existing task.
-   Examples: task 4 delayed, task 8 pending, update task 2
-
-8. /issue - Reporting an issue.
-
-9. /issues - Viewing issues.
-   Examples: show issues, active issues
-
-10. /resolve - Resolving issues.
-    Examples: resolve issue 4, issue theek ho gaya
-
-11. /present - Attendance present.
-    Examples: aa gaya hu, present hu, i am here
-
-12. /absent - Attendance absent.
-    Examples: nahi aaunga, absent hu, leave chahiye
-
-13. /members - Viewing members.
-
-14. /report - Generating report.
-
-15. /help - Help request.
-
-16. general_chat - Greetings, casual conversation.
-
-IMPORTANT:
-- Understand CONTEXT. Do not depend only on keywords.
-- Hindi + Hinglish + English supported.
-- Return ONLY JSON.
-
-User message: {message}
-
-Output format:
-{{"intent": "string", "worker_slug": "string or null", "depart_slug": "operations|sales|purchase|it|null"}}
-
-Rules:
-- /assign => worker_slug required
-- /depart_assign => depart_slug required
-- /mgrassign => worker_slug required
-- /mgrself => worker_slug null
-- Others => both null"""
 
         response = client.chat.completions.create(
             model=CHAT_MODEL,
             temperature=0,
+            response_format={
+                "type": "json_object"
+            },
             messages=[
-                {"role": "system", "content": "You are an intent classifier. Return only valid JSON."},
-                {"role": "user", "content": prompt}
-            ]
+                {
+                    "role": "system",
+                    "content": self.build_system_prompt(),
+                },
+                {
+                    "role": "user",
+                    "content": message,
+                },
+            ],
         )
 
-        result = json.loads(response.choices[0].message.content)
-        return result
+        raw = response.choices[0].message.content
+
+        try:
+            return json.loads(raw)
+
+        except Exception:
+
+            return {
+                "intent": "general_chat",
+                "worker_slug": None,
+                "depart_slug": None,
+            }
+
+    # ========================================================
+    # MAIN PIPELINE
+    # ========================================================
 
     def classify(self, message: str):
-        # Extract task ID and mentions first
-        task_id = self.extract_task_id(message)
-        mention = self.extract_mentions(message)
 
-        # Get LLM classification
-        llm_result = self.llm_classify(message)
-
-        intent = llm_result.get("intent")
-        worker_slug = llm_result.get("worker_slug")
-        depart_slug = llm_result.get("depart_slug")
-
-        # Override with extracted mentions if present
-        if mention and intent in ["assign", "mgrassign"]:
-            worker_slug = mention
-
-        # Get deadline
         datetime_info = self.datetime_extractor.extract_date_from_message(message)
 
-        return {
+        task_id = self.extract_task_id(message)
+
+        mention = self.extract_mentions(message)
+
+        llm_result = self.llm_classify(message)
+
+        intent = llm_result.get(
+            "intent",
+            "general_chat",
+        )
+
+        # validate intent
+        if intent not in self.VALID_INTENTS:
+            intent = "general_chat"
+
+        worker_slug = llm_result.get("worker_slug")
+
+        depart_slug = llm_result.get("depart_slug")
+
+        # mention override
+        if mention and not worker_slug:
+            worker_slug = mention
+
+        # department validation
+        if depart_slug:
+
+            if depart_slug not in self.VALID_DEPARTMENTS:
+                depart_slug = None
+
+        result = {
             "intent": intent,
             "id": task_id,
             "worker_slug": worker_slug,
@@ -281,3 +447,381 @@ Rules:
             "deadline": datetime_info.get("deadline"),
             "message": None,
         }
+
+        # general response
+        if intent == "general_chat":
+
+            result["message"] = get_general_chat_response(message)
+
+        return result
+
+    # ========================================================
+    # SYSTEM PROMPT
+    # ========================================================
+
+    def build_system_prompt(self):
+
+        return """
+    You are an enterprise multilingual intent classification engine.
+
+You understand:
+- English
+- Hindi
+- Hinglish
+
+You ONLY return valid JSON.
+
+========================================================
+CORE UNDERSTANDING RULE
+========================================================
+
+You MUST understand SEMANTIC MEANING, not just keywords.
+
+VERY IMPORTANT:
+
+There is a BIG difference between:
+
+1. INSTRUCTING someone to do work
+2. CONFIRMING work is already completed
+
+Examples:
+
+"complete the work"
+-> instruction
+-> /assign or /depart_assign
+
+"finish the task"
+-> instruction
+-> /assign or /depart_assign
+
+"task complete ho gaya"
+-> already completed
+-> /complete
+
+"done"
+-> already completed
+-> /complete
+
+"kar diya"
+-> already completed
+-> /complete
+
+========================================================
+SUPPORTED INTENTS
+========================================================
+
+1. /tasks
+User wants to view their tasks.
+
+Examples:
+- mera kaam dikhao
+- my tasks
+- pending tasks
+- mujhe kya karna hai
+- task list dikhao
+
+========================================================
+
+2. /assign
+
+Assigning NEW work to a specific person.
+
+This means:
+- user is instructing a person to do work
+- NO existing task reference
+
+Examples:
+- ajay ko warehouse khali karne bolo
+- @rahul invoice bhejdo
+- priya client ko call kare
+- ajay complete the work
+- complete the work ajay
+- rahul ye task finish karo
+
+IMPORTANT:
+If user is telling someone to complete/finish work,
+it is STILL assignment.
+
+Rules:
+- worker_slug required
+- depart_slug null
+
+========================================================
+
+3. /depart_assign
+
+Assigning work to a department WITHOUT naming a person.
+
+Departments:
+- operations
+- sales
+- purchase
+- it
+
+Examples:
+- warehouse khali karo
+- invoice bhejo
+- server theek karo
+- raw material order karo
+- complete the dispatch work
+- finish warehouse cleaning
+
+Rules:
+- depart_slug required
+- worker_slug null
+
+========================================================
+
+4. /mgrassign
+
+Manager assigning EXISTING TASK to another person.
+
+This ONLY applies when:
+- existing task reference present
+AND
+- another person mentioned
+
+Task references:
+- task 5
+- id 7
+- #9
+- 4 wala task
+
+Examples:
+- task 32 ajay ko do
+- task 5 @rahul ko assign karo
+- id 4 priya ko de do
+- task 9 ajay complete karo
+
+Rules:
+- worker_slug required
+- existing task reference required
+
+========================================================
+
+5. /mgrself
+
+Manager taking task themselves.
+
+Examples:
+- task 32 main karunga
+- main ye task kar lunga
+- i will do task 8
+- task 9 mai khud karunga
+
+Rules:
+- worker_slug null
+
+========================================================
+
+6. /complete
+
+ONLY when the user is CONFIRMING
+that work is ALREADY FINISHED.
+
+This is NOT an instruction.
+
+Examples:
+- ho gaya
+- kar diya
+- done
+- completed
+- task complete ho gaya
+- work finished
+- task khatam ho gaya
+- complete kar diya
+- dispatch done
+
+IMPORTANT:
+If user is INSTRUCTING someone to complete work,
+then it is NOT /complete.
+
+Examples:
+- complete the work
+- finish the task
+- ajay complete this
+- warehouse complete karo
+
+These are assignments.
+
+========================================================
+
+7. /update
+
+Updating status of existing work/task.
+
+Examples:
+- task delayed hai
+- task pending hai
+- update task 4
+- task 5 hold pe hai
+
+========================================================
+
+8. /issue
+
+Reporting a new issue/problem.
+
+Examples:
+- machine kharab hai
+- issue hai
+- server down hai
+- printer kaam nahi kar raha
+
+========================================================
+
+9. /issues
+
+Viewing issues.
+
+Examples:
+- active issues
+- show issues
+- issues dikhao
+
+========================================================
+
+10. /resolve
+
+Resolving issue.
+
+Examples:
+- resolve issue 4
+- issue theek ho gaya
+- problem solved
+
+========================================================
+
+11. /present
+
+Attendance present.
+
+Examples:
+- aa gaya hu
+- present hu
+- i am here
+- office aa gaya
+
+========================================================
+
+12. /absent
+
+Attendance absent.
+
+Examples:
+- absent hu
+- nahi aaunga
+- leave chahiye
+- aaj nahi aa paunga
+
+========================================================
+
+13. /members
+
+Viewing members/team.
+
+Examples:
+- members dikhao
+- team members
+- employee list
+
+========================================================
+
+14. /report
+
+Generating reports.
+
+Examples:
+- report generate karo
+- daily report
+- weekly report
+
+========================================================
+
+15. /help
+
+Help request.
+
+Examples:
+- help
+- commands batao
+- kaise use kare
+
+========================================================
+
+16. general_chat
+
+Casual conversation only.
+
+Examples:
+- hello
+- hi
+- kaise ho
+- good morning
+
+========================================================
+DEPARTMENT ROUTING RULES
+========================================================
+
+operations:
+- warehouse
+- dispatch
+- logistics
+- delivery
+- inventory
+- production
+- machine
+- packaging
+- loading/unloading
+
+sales:
+- invoice
+- customer
+- client
+- quotation
+- payment
+- order
+
+purchase:
+- vendor
+- supplier
+- procurement
+- raw material
+- buying
+- sourcing
+
+it:
+- server
+- laptop
+- computer
+- software
+- internet
+- wifi
+- printer
+
+========================================================
+OUTPUT FORMAT
+========================================================
+
+Return ONLY valid JSON.
+
+{
+  "intent": "string",
+  "worker_slug": "string or null",
+  "depart_slug": "operations|sales|purchase|it|null"
+}
+
+========================================================
+STRICT RULES
+========================================================
+
+- /assign => worker_slug required
+- /mgrassign => worker_slug required
+- /depart_assign => depart_slug required
+- /mgrself => worker_slug null
+- all others => both null
+
+Never return explanations.
+Never return markdown.
+Only return JSON.
+"""
